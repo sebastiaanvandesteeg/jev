@@ -1,0 +1,42 @@
+{
+  "name": "jev-workbench",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "predev": "npm run build -w @jev/shared",
+    "pretest": "npm run build -w @jev/shared",
+    "pretest:e2e": "npm run build",
+    "pretest:large": "npm run build -w @jev/shared",
+    "pretest:live": "npm run build -w @jev/shared",
+    "dev": "concurrently -k -n api,web -c cyan,magenta \"npm run dev -w @jev/api\" \"npm run dev -w @jev/web\"",
+    "build": "npm run build -w @jev/shared && npm run build -w @jev/api && npm run build -w @jev/web",
+    "start": "npm run start -w @jev/api",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "node --import tsx --test apps/api/test/*.test.ts",
+    "test:e2e": "playwright test",
+    "test:large": "node --import tsx scripts/large-import.ts",
+    "test:live": "node --env-file-if-exists=.env --import tsx scripts/live-smoke.ts",
+    "example": "node --import tsx scripts/example.ts"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.55.0",
+    "@types/node": "^24.0.0",
+    "@types/supertest": "^6.0.3",
+    "@types/yazl": "^3.3.0",
+    "concurrently": "^9.2.0",
+    "prettier": "^3.9.8",
+    "supertest": "^7.1.4",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0",
+    "yazl": "^3.3.1"
+  }
+}

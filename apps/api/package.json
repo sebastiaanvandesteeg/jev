@@ -1,0 +1,27 @@
+{
+  "name": "@jev/api",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch --env-file-if-exists=../../.env src/index.ts",
+    "build": "tsc",
+    "start": "node --env-file-if-exists=../../.env dist/index.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@jev/shared": "*",
+    "@typesafe-ai/sdk": "0.6.0",
+    "csv-parse": "^7.0.2",
+    "express": "^5.1.0",
+    "multer": "^2.0.2",
+    "stream-json": "^3.7.0",
+    "yauzl": "^3.2.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.3",
+    "@types/multer": "^2.0.0",
+    "@types/yauzl": "^2.10.3"
+  }
+}
