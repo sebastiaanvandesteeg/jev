@@ -25,6 +25,8 @@
     "test:e2e": "playwright test",
     "test:large": "node --import tsx scripts/large-import.ts",
     "test:live": "node --env-file-if-exists=.env --import tsx scripts/live-smoke.ts",
+    "pretest:cosmos": "npm run build -w @jev/shared",
+    "test:cosmos": "node --env-file-if-exists=.env --import tsx scripts/cosmos-smoke.ts",
     "example": "node --import tsx scripts/example.ts"
   },
   "devDependencies": {

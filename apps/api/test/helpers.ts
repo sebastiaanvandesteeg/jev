@@ -9,6 +9,7 @@ import type { JevResponse, RequestPreview } from '@jev/shared';
 import { getConfig, type Config } from '../src/config.js';
 import { createApp } from '../src/app.js';
 import type { Provider } from '../src/provider.js';
+import type { CosmosAdapter } from '../src/cosmos.js';
 
 export async function zipFile(
   directory: string,
@@ -55,17 +56,19 @@ export function answer(request: RequestPreview): JevResponse {
 export async function setup(
   provider: Provider = { evaluate: async (request) => answer(request) },
   overrides: Partial<Config> = {},
+  cosmosAdapter?: CosmosAdapter,
 ) {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'jev-test-'));
   const config = {
     ...getConfig(),
     dataDir: path.join(dir, 'data'),
     apiKey: 'test-key',
+    cosmosConnectionString: '',
     concurrency: 1,
     requestsPerSecond: 200,
     ...overrides,
   };
-  const workbench = createApp(config, provider);
+  const workbench = createApp(config, provider, cosmosAdapter);
   return {
     ...workbench,
     config,

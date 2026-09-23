@@ -6,14 +6,34 @@ import path from 'node:path';
 import { createApp } from '../apps/api/src/app.js';
 import { getConfig } from '../apps/api/src/config.js';
 import { answer } from '../apps/api/test/helpers.js';
+import { cosmosFixture, fixtureConnectionString } from '../apps/api/test/cosmos-fixture.js';
+
+const cosmos = cosmosFixture();
 
 const dataDir = await mkdtemp(path.join(os.tmpdir(), 'jev-e2e-'));
 const w = createApp(
-  { ...getConfig(), dataDir, apiKey: 'synthetic-e2e-only', requestsPerSecond: 30 },
+  {
+    ...getConfig(),
+    dataDir,
+    apiKey: 'synthetic-e2e-only',
+    cosmosConnectionString: fixtureConnectionString,
+    requestsPerSecond: 30,
+  },
   {
     evaluate: async (request, signal) => {
       await setTimeout(30, undefined, { signal });
       return answer(request);
+    },
+  },
+  {
+    ...cosmos.adapter,
+    async *query(input, signal) {
+      if (input.query === 'INVALID SQL')
+        throw Object.assign(new Error('Synthetic SQL error'), { code: 400 });
+      if (input.query.includes('WHERE')) {
+        if (input.limit !== 10) await setTimeout(1200, undefined, { signal });
+        yield { id: '001', message: 'Filtered message' };
+      } else yield* cosmos.adapter.query(input, signal);
     },
   },
 );

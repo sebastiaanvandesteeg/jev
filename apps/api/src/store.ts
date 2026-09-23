@@ -58,8 +58,11 @@ export class Store {
         PRIMARY KEY(runId, recordId)
       );
       CREATE INDEX IF NOT EXISTS run_records_status ON run_records(runId, status, recordId);
-      PRAGMA user_version = 1;
     `);
+    // Additive migration: existing file datasets have no external origin.
+    if (!this.all('PRAGMA table_info(datasets)').some((column) => column.name === 'origin'))
+      this.db.exec('ALTER TABLE datasets ADD COLUMN origin TEXT');
+    this.db.exec('PRAGMA user_version = 2');
   }
   all(sql: string, ...params: SQLInputValue[]): Row[] {
     return this.db.prepare(sql).all(...params);
@@ -95,7 +98,7 @@ export class Store {
         this.exec('DELETE FROM records WHERE datasetId=?', id);
         this.exec('UPDATE sources SET recordCount=0 WHERE datasetId=?', id);
         this.exec(
-          "UPDATE datasets SET status='failed', recordCount=0, error='The server stopped during import. Upload the file again.' WHERE id=?",
+          "UPDATE datasets SET status='failed', recordCount=0, fields='[]', processedFiles=0, bytes=CASE WHEN origin IS NULL THEN bytes ELSE 0 END, error=CASE WHEN origin IS NULL THEN 'The server stopped during import. Upload the file again.' ELSE 'The server stopped during the Cosmos DB import. Run the query again to create a new snapshot.' END WHERE id=?",
           id,
         );
       }
@@ -109,12 +112,30 @@ export class Store {
       ...row,
       fields: JSON.parse(row.fields),
       warnings: JSON.parse(row.warnings),
+      origin: row.origin ? JSON.parse(row.origin) : null,
     } as Dataset;
   }
   dataset(id: string): DatasetDetail {
     const row = this.get('SELECT * FROM datasets WHERE id=?', id);
     if (!row) throw new HttpError(404, 'Dataset not found.');
     return { ...this.decodeDataset(row), sources: this.sources(id) };
+  }
+  renameDataset(id: string, name: string): DatasetDetail {
+    this.dataset(id);
+    this.exec('UPDATE datasets SET name=? WHERE id=?', name, id);
+    return this.dataset(id);
+  }
+  deleteDataset(id: string) {
+    this.transaction(() => {
+      this.exec(
+        'DELETE FROM run_records WHERE runId IN (SELECT id FROM runs WHERE datasetId=?)',
+        id,
+      );
+      this.exec('DELETE FROM runs WHERE datasetId=?', id);
+      this.exec('DELETE FROM records WHERE datasetId=?', id);
+      this.exec('DELETE FROM sources WHERE datasetId=?', id);
+      this.exec('DELETE FROM datasets WHERE id=?', id);
+    });
   }
   sources(id: string): SourceFile[] {
     return this.all('SELECT * FROM sources WHERE datasetId=? ORDER BY path', id).map(

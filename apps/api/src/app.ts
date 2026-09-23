@@ -4,13 +4,24 @@ import { mkdirSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { setImmediate } from 'node:timers/promises';
 import { z } from 'zod';
-import { buildRequest, filterSchema, runConfigSchema } from '@jev/shared';
+import {
+  buildRequest,
+  filterSchema,
+  runConfigSchema,
+  datasetRenameSchema,
+  cosmosDatabaseSchema,
+  cosmosQuerySchema,
+  cosmosImportSchema,
+  COSMOS_MAX_RECORDS,
+  COSMOS_DEFAULT_RECORDS,
+} from '@jev/shared';
 import { type Config, repoRoot } from './config.js';
 import { Store } from './store.js';
 import { Importer } from './importer.js';
 import { Runner } from './runner.js';
 import { createProvider, type Provider } from './provider.js';
 import { HttpError, messageOf } from './errors.js';
+import { CosmosConnection, type CosmosAdapter } from './cosmos.js';
 
 const pageQuery = z.object({
   page: z.coerce.number().int().min(1).default(1),
@@ -35,10 +46,11 @@ export function csvCell(value: unknown) {
   return `"${text.replaceAll('"', '""')}"`;
 }
 
-export function createApp(config: Config, provider?: Provider) {
+export function createApp(config: Config, provider?: Provider, cosmosAdapter?: CosmosAdapter) {
   const store = new Store(config.dataDir);
   store.recover();
   const importer = new Importer(store, config);
+  const cosmos = new CosmosConnection(config.cosmosConnectionString, cosmosAdapter);
   const runner = new Runner(store, config, provider || createProvider(config.apiKey));
   const app = express();
   app.disable('x-powered-by');
@@ -67,12 +79,33 @@ export function createApp(config: Config, provider?: Provider) {
   app.get('/api/config', (_req, res) =>
     res.json({
       hasApiKey: Boolean(config.apiKey),
+      hasCosmosConnection: cosmos.configured,
+      cosmosMaxRecords: COSMOS_MAX_RECORDS,
+      cosmosDefaultRecords: COSMOS_DEFAULT_RECORDS,
       model: config.model,
       maxUploadBytes: config.maxUploadBytes,
       concurrency: config.concurrency,
       requestsPerSecond: config.requestsPerSecond,
     }),
   );
+  app.get('/api/cosmos/databases', async (_req, res) => res.json(await cosmos.list()));
+  app.get('/api/cosmos/containers', async (req, res) => {
+    const { databaseId } = cosmosDatabaseSchema.parse(req.query);
+    res.json(await cosmos.list(databaseId));
+  });
+  app.post('/api/cosmos/preview', async (req, res) => {
+    res.json(await cosmos.preview(cosmosQuerySchema.parse(req.body), config.maxUploadBytes));
+  });
+  app.post('/api/cosmos/import', (req, res) => {
+    const { name, ...query } = cosmosImportSchema.parse(req.body);
+    const origin = {
+      kind: 'cosmos' as const,
+      accountHost: cosmos.accountHost,
+      ...query,
+      completedAt: null,
+    };
+    res.status(202).json(importer.acceptRecords(name, origin, cosmos.records(query)));
+  });
   app.get('/api/datasets', (_req, res) => res.json(store.datasets()));
   app.post('/api/datasets', upload.single('file'), async (req, res) => {
     if (!req.file) throw new HttpError(400, 'Choose a JSON, CSV, or ZIP file.');
@@ -82,6 +115,20 @@ export function createApp(config: Config, provider?: Provider) {
       .json(await importer.accept(req.file.path, req.file.originalname, req.file.size, name));
   });
   app.get('/api/datasets/:id', (req, res) => res.json(store.dataset(req.params.id)));
+  app.patch('/api/datasets/:id', (req, res) => {
+    const { name } = datasetRenameSchema.parse(req.body);
+    res.json(store.renameDataset(req.params.id, name));
+  });
+  app.delete('/api/datasets/:id', (req, res) => {
+    store.dataset(req.params.id);
+    if (runner.isDatasetBusy(req.params.id))
+      throw new HttpError(
+        409,
+        'An experiment is still active. Wait for it to finish, or cancel it in Run history and wait for it to stop before deleting this dataset.',
+      );
+    importer.deleteDataset(req.params.id);
+    res.status(204).end();
+  });
   app.post('/api/datasets/:id/import', (req, res) => {
     const body = z.object({ selections: z.record(z.string().nullable()) }).parse(req.body);
     res.status(202).json(importer.continue(req.params.id, body.selections));
@@ -245,6 +292,7 @@ export function createApp(config: Config, provider?: Provider) {
     importer,
     runner,
     async close() {
+      cosmos.close();
       await runner.stop();
       await importer.idle();
       store.close();

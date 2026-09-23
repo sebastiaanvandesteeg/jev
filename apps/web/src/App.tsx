@@ -22,6 +22,9 @@ import type { AppConfig, Dataset, DatasetDetail, RecordFilter } from '@jev/share
 import { api, bytes, date, navigate, number } from './api';
 import { Badge, ErrorNote, Loading, Modal } from './components';
 import { DataView } from './DataView';
+import { CosmosImportDialog } from './CosmosImport';
+import { AzureResourceIcon } from './AzureResourceIcon';
+import { DatasetActions } from './DatasetActions';
 const Experiment = lazy(() =>
   import('./Experiment').then((module) => ({ default: module.Experiment })),
 );
@@ -43,6 +46,7 @@ export function App() {
   const parts = path.split('/');
   const datasetId = parts[0] === 'datasets' ? parts[1] : undefined;
   const [upload, setUpload] = useState(false);
+  const [cosmosImport, setCosmosImport] = useState(false);
   const datasets = useQuery({
     queryKey: ['datasets'],
     queryFn: () => api<Dataset[]>('/datasets'),
@@ -83,6 +87,9 @@ export function App() {
         <button className="nav-item" onClick={() => setUpload(true)}>
           <Plus size={18} /> Import dataset
         </button>
+        <button className="nav-item" onClick={() => setCosmosImport(true)}>
+          <AzureResourceIcon /> Import from Cosmos DB
+        </button>
         <div className="nav-caption dataset-caption">YOUR DATASETS</div>
         <div className="sidebar-datasets">
           {datasets.data?.map((d) => (
@@ -91,7 +98,7 @@ export function App() {
               className={`dataset-nav ${d.id === datasetId ? 'active' : ''}`}
               onClick={() => navigate(`datasets/${d.id}`)}
             >
-              <Folder size={15} />
+              {d.origin ? <AzureResourceIcon size={16} /> : <Folder size={15} />}
               <span>{d.name}</span>
               {d.status === 'ready' && <small>{number(d.recordCount)}</small>}
             </button>
@@ -153,6 +160,7 @@ export function App() {
                 loading={datasets.isLoading}
                 error={datasets.error}
                 onUpload={() => setUpload(true)}
+                onCosmosImport={() => setCosmosImport(true)}
               />
             )}
           </Suspense>
@@ -176,6 +184,9 @@ export function App() {
           onClose={() => setUpload(false)}
         />
       )}
+      {cosmosImport && (
+        <CosmosImportDialog config={settings.data} onClose={() => setCosmosImport(false)} />
+      )}
     </div>
   );
 }
@@ -184,11 +195,13 @@ function Library({
   loading,
   error,
   onUpload,
+  onCosmosImport,
 }: {
   datasets: Dataset[];
   loading: boolean;
   error: unknown;
   onUpload: () => void;
+  onCosmosImport: () => void;
 }) {
   const [search, setSearch] = useState('');
   return (
@@ -199,9 +212,14 @@ function Library({
           <h1>Dataset library</h1>
           <p>A place to explore, ask small questions, and find useful answers.</p>
         </div>
-        <button className="primary" onClick={onUpload}>
-          <Plus size={17} /> Import dataset
-        </button>
+        <div className="library-import-actions">
+          <button className="secondary" onClick={onCosmosImport}>
+            <AzureResourceIcon size={20} /> Import from Cosmos DB
+          </button>
+          <button className="primary" onClick={onUpload}>
+            <Plus size={17} /> Import dataset
+          </button>
+        </div>
       </div>
       <div className="intro-panel">
         <div className="intro-copy">
@@ -272,30 +290,35 @@ function Library({
           {datasets
             .filter((d) => d.name.toLowerCase().includes(search.toLowerCase()))
             .map((d) => (
-              <button
-                className="dataset-card"
-                key={d.id}
-                onClick={() => navigate(`datasets/${d.id}`)}
-              >
-                <div className="card-top">
-                  <span className="file-icon">
-                    <Database size={20} />
-                  </span>
-                  <Badge status={d.status} />
-                </div>
-                <h3>{d.name}</h3>
-                <p className="archive-filename">{d.archiveName}</p>
-                <div className="dataset-card-stats">
-                  <span>
-                    <b>{number(d.recordCount)}</b> records
-                  </span>
-                  <span>{bytes(d.bytes)}</span>
-                </div>
+              <article className="dataset-card" key={d.id}>
+                <button
+                  className="dataset-card-open"
+                  aria-label={`Open dataset ${d.name}`}
+                  onClick={() => navigate(`datasets/${d.id}`)}
+                >
+                  <div className="card-top">
+                    <span className={`file-icon${d.origin ? ' azure-resource-tile' : ''}`}>
+                      {d.origin ? <AzureResourceIcon size={26} /> : <Database size={20} />}
+                    </span>
+                    <Badge status={d.status} />
+                  </div>
+                  <h3>{d.name}</h3>
+                  <p className="archive-filename">
+                    {d.origin && 'Azure Cosmos DB · '}
+                    {d.archiveName}
+                  </p>
+                  <div className="dataset-card-stats">
+                    <span>
+                      <b>{number(d.recordCount)}</b> records
+                    </span>
+                    <span>{bytes(d.bytes)}</span>
+                  </div>
+                </button>
                 <div className="card-bottom">
                   <span>Imported {date(d.createdAt)}</span>
-                  <ArrowRight size={16} />
+                  <DatasetActions dataset={d} compact />
                 </div>
-              </button>
+              </article>
             ))}
         </div>
       ) : (
@@ -483,7 +506,7 @@ function DatasetPage({
           <div className="eyebrow">DATASET WORKSPACE</div>
           <h1>{d.name}</h1>
           <p className="dataset-subtitle">
-            <FileArchive size={14} />
+            {d.origin ? <AzureResourceIcon size={18} /> : <FileArchive size={14} />}
             {d.archiveName}
             <span>·</span>
             {number(d.recordCount)} records<span>·</span>
@@ -491,8 +514,24 @@ function DatasetPage({
             {bytes(d.bytes)}
           </p>
         </div>
-        <Badge status={d.status} />
+        <div className="dataset-heading-actions">
+          <Badge status={d.status} />
+          <DatasetActions dataset={d} />
+        </div>
       </div>
+      {d.origin && (
+        <details className="cosmos-origin">
+          <summary>
+            <AzureResourceIcon size={18} /> Azure Cosmos DB snapshot · {d.origin.accountHost}
+          </summary>
+          <p>
+            {d.origin.databaseId} / {d.origin.containerId} · Limit: {number(d.origin.limit)} results
+            {d.origin.completedAt && ` · Saved ${date(d.origin.completedAt)}`}
+          </p>
+          <pre className="json-view">{d.origin.query}</pre>
+          <p>This is a saved local copy. Reimport to retrieve current query results.</p>
+        </details>
+      )}
       {d.status !== 'ready' ? (
         <ImportStatus dataset={d} />
       ) : (
@@ -587,9 +626,16 @@ function ImportStatus({ dataset }: { dataset: DatasetDetail }) {
   if (dataset.status === 'failed')
     return (
       <div className="panel">
-        <h2>We couldn’t import this file</h2>
+        <h2>
+          {dataset.origin ? 'We couldn’t import from Cosmos DB' : 'We couldn’t import this file'}
+        </h2>
         <ErrorNote error={dataset.error} />
-        <p className="muted">No partial records were kept. Correct the file and upload it again.</p>
+        <p className="muted">
+          No partial records were kept.{' '}
+          {dataset.origin
+            ? 'Check the connection or query and start a new Cosmos DB import.'
+            : 'Correct the file and upload it again.'}
+        </p>
       </div>
     );
   if (dataset.status === 'needs_selection')
@@ -635,12 +681,15 @@ function ImportStatus({ dataset }: { dataset: DatasetDetail }) {
     );
   return (
     <div className="panel importing">
-      <Loading label="Preparing your dataset" />
+      <Loading label={dataset.origin ? 'Reading from Cosmos DB' : 'Preparing your dataset'} />
       <p className="muted">Reading your data. You can leave this page while the import finishes.</p>
-      <progress value={dataset.processedFiles} max={dataset.totalFiles || 1} />
+      <progress
+        value={dataset.origin ? undefined : dataset.processedFiles}
+        max={dataset.totalFiles || 1}
+      />
       <span>
-        {dataset.processedFiles} / {dataset.totalFiles || '…'} files · {number(dataset.recordCount)}{' '}
-        records read
+        {!dataset.origin && `${dataset.processedFiles} / ${dataset.totalFiles || '…'} files · `}
+        {number(dataset.recordCount)} records read
       </span>
     </div>
   );

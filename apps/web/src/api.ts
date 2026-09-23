@@ -1,16 +1,21 @@
-export async function api<T>(path: string, body?: unknown): Promise<T> {
-  const response = await fetch(
-    `/api${path}`,
-    body === undefined
-      ? undefined
+export async function api<T>(
+  path: string,
+  body?: unknown,
+  signal?: AbortSignal,
+  method = body === undefined ? 'GET' : 'POST',
+): Promise<T> {
+  const response = await fetch(`/api${path}`, {
+    signal,
+    method,
+    ...(body === undefined
+      ? {}
       : {
-          method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
-        },
-  );
-  const result = await response.json();
-  if (!response.ok) throw new Error(result.error || 'The request failed.');
+        }),
+  });
+  const result = response.status === 204 ? undefined : await response.json();
+  if (!response.ok) throw new Error(result?.error || 'The request failed.');
   return result;
 }
 export const queryString = (values: Record<string, unknown>) =>

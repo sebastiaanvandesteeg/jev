@@ -95,6 +95,38 @@ export const runConfigSchema = z.object({
     .default({ mode: 'sample', count: 10 }),
 });
 export type RunConfig = z.infer<typeof runConfigSchema>;
+export const datasetRenameSchema = z.object({
+  name: z.string().trim().min(1, 'Enter a dataset name.').max(150),
+});
+export const COSMOS_MAX_RECORDS = 10000;
+export const COSMOS_DEFAULT_RECORDS = 1000;
+export const cosmosDatabaseSchema = z.object({ databaseId: z.string().min(1).max(255) });
+export const cosmosQuerySchema = cosmosDatabaseSchema.extend({
+  containerId: z.string().min(1).max(255),
+  query: z.string().trim().min(1, 'Enter a SQL query.').max(32000),
+  limit: z.number().int().min(1).max(COSMOS_MAX_RECORDS).default(COSMOS_DEFAULT_RECORDS),
+});
+export const cosmosImportSchema = cosmosQuerySchema.extend({
+  name: z.string().trim().min(1).max(150),
+});
+export type CosmosQuery = z.infer<typeof cosmosQuerySchema>;
+export type CosmosImport = z.infer<typeof cosmosImportSchema>;
+export interface CosmosPreview {
+  records: Document[];
+  limitReached: boolean;
+}
+export interface CosmosOrigin {
+  kind: 'cosmos';
+  accountHost: string;
+  databaseId: string;
+  containerId: string;
+  query: string;
+  limit: number;
+  completedAt: string | null;
+}
+export const asDocument = (value: Json): Document =>
+  value !== null && typeof value === 'object' && !Array.isArray(value) ? value : { value };
+
 export type DatasetStatus = 'importing' | 'needs_selection' | 'ready' | 'failed';
 export interface Dataset {
   id: string;
@@ -109,6 +141,7 @@ export interface Dataset {
   fields: string[];
   warnings: string[];
   error: string | null;
+  origin: CosmosOrigin | null;
 }
 export interface SourceFile {
   id: string;
@@ -181,6 +214,9 @@ export interface RunDetail extends Run {
 }
 export interface AppConfig {
   hasApiKey: boolean;
+  hasCosmosConnection: boolean;
+  cosmosMaxRecords: number;
+  cosmosDefaultRecords: number;
   model: string;
   maxUploadBytes: number;
   concurrency: number;

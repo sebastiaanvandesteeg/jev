@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { createReadStream, createWriteStream } from 'node:fs';
+import { createReadStream, createWriteStream, rmSync } from 'node:fs';
 import { mkdir, readFile, rename, rm } from 'node:fs/promises';
 import { setImmediate } from 'node:timers/promises';
 import { createInterface } from 'node:readline';
@@ -8,7 +8,7 @@ import { pipeline } from 'node:stream/promises';
 import path from 'node:path';
 import yauzl, { type Entry, type ZipFile } from 'yauzl';
 import { parse } from 'csv-parse';
-import type { Document, Json, SourceFile } from '@jev/shared';
+import { asDocument, type CosmosOrigin, type Json, type SourceFile } from '@jev/shared';
 import type { Config } from './config.js';
 import { Store } from './store.js';
 import { HttpError, messageOf } from './errors.js';
@@ -48,9 +48,6 @@ const formats: Record<string, string> = {
   '.txt': 'text',
   '.md': 'text',
 };
-const asDocument = (value: Json): Document =>
-  value !== null && typeof value === 'object' && !Array.isArray(value) ? value : { value };
-
 export class Importer {
   private jobs = new Set<Promise<void>>();
   private pending = new Set<string>();
@@ -63,6 +60,24 @@ export class Importer {
   }
   sourceFile(datasetId: string, sourceId: string) {
     return path.join(this.config.dataDir, 'staging', datasetId, sourceId);
+  }
+  deleteDataset(id: string) {
+    const dataset = this.store.dataset(id);
+    if (dataset.status === 'importing' || this.pending.has(id))
+      throw new HttpError(409, 'Wait for this dataset to finish importing before deleting it.');
+    // Keep deletion synchronous so no import or queued run can start during cleanup.
+    // Only generated workspace paths are removed, never original source filenames.
+    try {
+      rmSync(path.join(this.config.dataDir, 'staging', id), { recursive: true, force: true });
+      for (const extension of ['.zip', '.json', '.csv'])
+        rmSync(this.archive(id, extension), { force: true });
+    } catch {
+      throw new HttpError(
+        500,
+        'Could not remove the local import files. Check data directory permissions and try again.',
+      );
+    }
+    this.store.deleteDataset(id);
   }
   async accept(tempFile: string, archiveName: string, bytes: number, name?: string) {
     const extension = path.extname(archiveName).toLowerCase();
@@ -89,6 +104,31 @@ export class Importer {
     );
     return this.store.dataset(id);
   }
+  acceptRecords(name: string, origin: CosmosOrigin, records: AsyncIterable<Json>) {
+    const id = randomUUID();
+    const sourceId = randomUUID();
+    const sourcePath = `cosmos://${origin.accountHost}/${encodeURIComponent(origin.databaseId)}/${encodeURIComponent(origin.containerId)}`;
+    this.store.transaction(() => {
+      this.store.exec(
+        'INSERT INTO datasets(id,name,archiveName,bytes,createdAt,origin,totalFiles) VALUES(?,?,?,?,?,?,1)',
+        id,
+        name,
+        `${origin.databaseId} / ${origin.containerId}`,
+        0,
+        new Date().toISOString(),
+        JSON.stringify(origin),
+      );
+      this.store.exec(
+        'INSERT INTO sources(id,datasetId,path,format) VALUES(?,?,?,?)',
+        sourceId,
+        id,
+        sourcePath,
+        'cosmos',
+      );
+    });
+    this.launch(id, () => this.normalize(id, records));
+    return this.store.dataset(id);
+  }
   private launch(id: string, task: () => Promise<void>) {
     if (this.pending.has(id)) throw new HttpError(409, 'This import is already running.');
     this.pending.add(id);
@@ -98,7 +138,7 @@ export class Importer {
           this.store.exec('DELETE FROM records WHERE datasetId=?', id);
           this.store.exec('UPDATE sources SET recordCount=0 WHERE datasetId=?', id);
           this.store.exec(
-            "UPDATE datasets SET status='failed', recordCount=0, fields='[]', error=? WHERE id=?",
+            "UPDATE datasets SET status='failed', recordCount=0, fields='[]', processedFiles=0, bytes=CASE WHEN origin IS NULL THEN bytes ELSE 0 END, error=? WHERE id=?",
             messageOf(error),
             id,
           );
@@ -322,11 +362,13 @@ export class Importer {
       }
     } else yield { text: await readFile(file, 'utf8') };
   }
-  private async normalize(id: string) {
+  private async normalize(id: string, records?: AsyncIterable<Json>) {
     const sources = this.store.sources(id);
+    const origin = this.store.dataset(id).origin;
     const fields = new Set<string>();
     let count = 0,
-      completed = 0;
+      completed = 0,
+      bytes = 0;
     this.store.exec(
       'UPDATE datasets SET processedFiles=0, totalFiles=? WHERE id=?',
       sources.length,
@@ -345,13 +387,22 @@ export class Importer {
         count += batch.length;
         batch = [];
         this.store.exec('UPDATE datasets SET recordCount=? WHERE id=?', count, id);
+        if (origin) this.store.exec('UPDATE datasets SET bytes=? WHERE id=?', bytes, id);
       };
       try {
-        for await (const raw of this.readSource(source)) {
+        for await (const raw of records ?? this.readSource(source)) {
           const document = asDocument(raw);
+          const data = JSON.stringify(document);
+          if (origin) {
+            bytes += Buffer.byteLength(data);
+            if (bytes > this.config.maxUploadBytes)
+              throw new Error(
+                'Query results exceed the dataset size limit. Select fewer fields or narrow the query.',
+              );
+          }
           position++;
           for (const key of Object.keys(document)) fields.add(key);
-          batch.push({ position, data: JSON.stringify(document) });
+          batch.push({ position, data });
           if (batch.length >= 250) {
             flush();
             await setImmediate();
@@ -364,7 +415,23 @@ export class Importer {
       this.store.exec('UPDATE sources SET recordCount=? WHERE id=?', position, source.id);
       this.store.exec('UPDATE datasets SET processedFiles=? WHERE id=?', ++completed, id);
     }
-    if (!count) throw new Error('The archive contained no records.');
+    if (!count)
+      throw new Error(origin ? 'Query returned no results.' : 'The archive contained no records.');
+    if (origin) {
+      origin.completedAt = new Date().toISOString();
+      this.store.exec(
+        'UPDATE datasets SET origin=?, warnings=? WHERE id=?',
+        JSON.stringify(origin),
+        JSON.stringify(
+          count === origin.limit
+            ? [
+                `Import stopped at the requested limit of ${count.toLocaleString()} results. Additional results may exist.`,
+              ]
+            : [],
+        ),
+        id,
+      );
+    }
     this.store.exec(
       "UPDATE datasets SET status='ready', fields=?, recordCount=? WHERE id=?",
       JSON.stringify([...fields].sort()),

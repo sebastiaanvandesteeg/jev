@@ -9,7 +9,7 @@ export class Runner {
   private timer?: ReturnType<typeof setInterval>;
   private active = new Map<
     string,
-    { runId: string; controller: AbortController; promise: Promise<void> }
+    { runId: string; datasetId: string; controller: AbortController; promise: Promise<void> }
   >();
   private stopped = false;
   constructor(
@@ -86,10 +86,21 @@ export class Runner {
   private abortRun(id: string) {
     for (const task of this.active.values()) if (task.runId === id) task.controller.abort();
   }
+  isDatasetBusy(datasetId: string) {
+    return (
+      [...this.active.values()].some((task) => task.datasetId === datasetId) ||
+      Boolean(
+        this.store.get(
+          "SELECT 1 FROM runs WHERE datasetId=? AND status IN ('queued','running') LIMIT 1",
+          datasetId,
+        ),
+      )
+    );
+  }
   private tick() {
     if (this.stopped || this.active.size >= this.config.concurrency) return;
     const next = this.store
-      .get(`SELECT rr.runId, rr.recordId, r.data, runs.config FROM run_records rr
+      .get(`SELECT rr.runId, rr.recordId, r.data, runs.config, runs.datasetId FROM run_records rr
       JOIN runs ON runs.id=rr.runId JOIN records r ON r.id=rr.recordId
       WHERE rr.status='pending' AND runs.status IN ('queued','running') ORDER BY runs.createdAt, rr.recordId LIMIT 1`);
     if (!next) return;
@@ -119,7 +130,7 @@ export class Runner {
       this.active.delete(key);
       this.finishIfDone(next.runId);
     });
-    this.active.set(key, { runId: next.runId, controller, promise });
+    this.active.set(key, { runId: next.runId, datasetId: next.datasetId, controller, promise });
   }
   private async evaluate(
     runId: string,

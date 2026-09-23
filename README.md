@@ -1,6 +1,6 @@
 # Jev Dataset Workbench
 
-A local Vite + React application with a Node/Express backend for exploring structured exports and asking focused Jev questions about their records. Upload JSON or CSV directly, or combine data files in a ZIP. Original uploads, normalized records, and experiment history persist on your machine.
+A local Vite + React application with a Node/Express backend for exploring structured exports and asking focused Jev questions about their records. Upload JSON or CSV directly, combine data files in a ZIP, or save query results from Azure Cosmos DB for NoSQL. Original uploads, normalized records, and experiment history persist on your machine.
 
 ## Start
 
@@ -59,6 +59,45 @@ Text files must be UTF-8. CSV supports quoted commas and multiline cells; incons
 
 Defaults: **100 MiB per uploaded file**, **500 MiB expanded archive**, **10,000 archive entries**. Path traversal, absolute paths, symlinks, encrypted files, and expansion-limit violations are rejected. Source filenames are metadata, never extraction destinations: staging files have generated IDs. Direct uploads, archive entries, and JSON arrays stream into bounded insert batches. A single document or text file still needs to fit in process memory. JSONL, NDJSON, TXT, and Markdown files remain supported inside ZIP archives.
 
+## Import from Cosmos DB
+
+Add an **Azure Cosmos DB for NoSQL read-only connection string** to the root `.env`, then restart the backend:
+
+```dotenv
+COSMOS_CONNECTION_STRING="AccountEndpoint=https://your-account.documents.azure.com:443/;AccountKey=your-read-only-key;"
+```
+
+Use a primary or secondary **read-only** connection string from the account's Keys page. MongoDB connection strings are not supported. The app calls only database/container listing and item-query operations; it does not test whether a supplied key permits writes. Cosmos DB must allow connections from the backend's network, including any firewall or private-endpoint requirements.
+
+1. Open **Import from Cosmos DB** and select a database and container.
+2. Enter a Cosmos SQL query, such as `SELECT c.id, c.message FROM c WHERE c.status = 'open'`. The initial query is `SELECT * FROM c`. Enter literal values in the query; named query parameters do not have an editor in this version.
+3. Choose a dataset name and maximum results: **1,000 by default, up to 10,000**.
+4. Optionally **Preview** up to 10 results without saving them.
+5. Choose **Import dataset**. The backend reads pages in the background, saves a local snapshot, and opens the existing dataset screen. Navigation and browser refresh do not stop the import.
+
+The connection string stays in the backend environment. It is never returned to the browser, included in saved provenance or exports, or printed in Cosmos errors. An absent or malformed connection string does not prevent file imports or use of saved datasets. Changing `.env` requires restarting the backend. Each running workbench uses one configured Cosmos account.
+
+Snapshots retain the returned projections and nested JSON. Scalar or array results from `SELECT VALUE` queries are wrapped in a `value` field. Duplicate document IDs remain separate records. Source details retain the account hostname, database, container, exact submitted query (including any query literals), requested limit, and completion time. Cosmos snapshots are stored directly in SQLite; there is no uploaded archive for them.
+
+Imports stop at the selected result limit and show a notice that more results may exist. Serialized normalized records must also fit within `MAX_UPLOAD_MIB` (**100 MiB** by default); exceeding this limit fails the import and removes partial records. Empty queries also fail with a clear message. Listing and preview have a **60-second** deadline; imports have a **five-minute** deadline. Failed, interrupted, or timed-out imports leave no partial records and can be retried as a new snapshot. Completed snapshots remain usable with Cosmos disconnected.
+
+Preview and import execute independently. A saved dataset is fixed after retrieval, but copying a changing container does **not** guarantee a database-wide point-in-time snapshot. Without an `ORDER BY`, do not assume the query returns a stable ordering. Queries consume request units; the result limit and page size do not cap Cosmos query cost, and aggregate queries may scan many records before returning a result. See the official [SDK query iterator documentation](https://learn.microsoft.com/en-us/javascript/api/@azure/cosmos/queryiterator?view=azure-node-latest).
+
+Loading and previewing records do not call Jev. Starting an experiment sends the selected fields to TypeSafe using the existing request preview and execution flow. This remains a local, single-user workbench; the connection string feature does not add Entra sign-in or tenant isolation.
+
+### Optional real Cosmos smoke test
+
+Automated tests use a fake Cosmos adapter and never require Azure credentials. To explicitly opt into a real, small read-only query, configure `COSMOS_CONNECTION_STRING` and run:
+
+```sh
+COSMOS_SMOKE_DATABASE=your-database \
+COSMOS_SMOKE_CONTAINER=your-container \
+COSMOS_SMOKE_QUERY='SELECT TOP 1 c.id FROM c' \
+npm run test:cosmos
+```
+
+The smoke test fetches at most one result, prints only the result count, and saves no document content. It skips unless all four variables are set.
+
 ## Jev integration
 
 The backend uses the official **`@typesafe-ai/sdk`**, pinned to **0.6.0** in the manifest and lockfile. See the [JavaScript SDK](https://docs.typesafe.ai/sdk/javascript), [question primitives](https://docs.typesafe.ai/primitives), and [model reference](https://docs.typesafe.ai/models).
@@ -72,6 +111,12 @@ The backend uses the official **`@typesafe-ai/sdk`**, pinned to **0.6.0** in the
 The request state is `{ record: <selected fields>, context?: <shared reference text> }`. The preview and server use the same projection function. Input selection is by top-level field; selecting a nested object includes the complete object. Nothing is silently truncated. Provider context-limit failures are saved per record with guidance to reduce the selected fields or reference context.
 
 The default model is `jev-latest`; each response's actual model version is retained. No chat/text-generation model is included. Summaries, filters, counts, and averages are computed by the application. Averages cover successful records only, and a confidence value is not a correctness guarantee.
+
+## Manage datasets
+
+Use the pencil or trash icon on a library card, or **Rename** and **Delete** in the dataset header. Names can contain up to 150 characters and are saved across restarts. Renaming changes the display name while keeping the dataset's records, source details, and experiment history.
+
+Deleting requires confirmation and permanently removes the local dataset, records, experiment history and results, and retained import files. Azure Cosmos DB source data and original files outside the workspace are unaffected. Imports and queued/running experiments must finish before deletion; you can cancel a run in **Run history** and delete once its active requests have stopped. Failed imports and imports awaiting array selection can also be deleted.
 
 ## Persistence and execution
 
@@ -98,17 +143,18 @@ Changing filters does not trigger inference. Reusing a configuration creates a n
 
 All values are read from the backend environment. The root `.env` is loaded by the start scripts; `DATA_DIR` resolves relative to the repository root.
 
-| Variable                  | Default                                |
-| ------------------------- | -------------------------------------- |
-| `TYPESAFE_API_KEY`        | Empty; required only for inference     |
-| `TYPESAFE_MODEL`          | `jev-latest`                           |
-| `PORT`                    | `3001` (also used by Vite's API proxy) |
-| `DATA_DIR`                | `./data`                               |
-| `MAX_UPLOAD_MIB`          | `100`                                  |
-| `MAX_EXPANDED_MIB`        | `500`                                  |
-| `MAX_ARCHIVE_FILES`       | `10000`                                |
-| `RUN_CONCURRENCY`         | `4`                                    |
-| `RUN_REQUESTS_PER_SECOND` | `10`                                   |
+| Variable                   | Default                                           |
+| -------------------------- | ------------------------------------------------- |
+| `TYPESAFE_API_KEY`         | Empty; required only for inference                |
+| `COSMOS_CONNECTION_STRING` | Empty; optional NoSQL read-only connection string |
+| `TYPESAFE_MODEL`           | `jev-latest`                                      |
+| `PORT`                     | `3001` (also used by Vite's API proxy)            |
+| `DATA_DIR`                 | `./data`                                          |
+| `MAX_UPLOAD_MIB`           | `100`                                             |
+| `MAX_EXPANDED_MIB`         | `500`                                             |
+| `MAX_ARCHIVE_FILES`        | `10000`                                           |
+| `RUN_CONCURRENCY`          | `4`                                               |
+| `RUN_REQUESTS_PER_SECOND`  | `10`                                              |
 
 ## Development and verification
 
@@ -118,6 +164,7 @@ npm test                # Import, SDK adapter, queue, recovery, and HTTP tests
 npm run test:e2e         # Production build + Chromium browser workflow, with a fake provider
 npm run test:large       # Temporary 100 MiB fixture, import + pagination + responsiveness
 npm run test:live        # Opt-in: one real request with synthetic data, when a key is configured
+npm run test:cosmos      # Opt-in: explicit small Cosmos query; see setup above
 npm run build
 ```
 
@@ -133,13 +180,19 @@ Workspaces:
 
 ## API
 
-Responses are JSON unless exporting. Invalid input returns `{ "error": "..." }` with an appropriate HTTP status. Records/results are paginated using `page` and `pageSize` (maximum 100).
+Responses are JSON unless exporting or returning HTTP 204 after deletion. Invalid input returns `{ "error": "..." }` with an appropriate HTTP status. Records/results are paginated using `page` and `pageSize` (maximum 100).
 
 | Method     | Endpoint                                | Purpose                                                                                  |
 | ---------- | --------------------------------------- | ---------------------------------------------------------------------------------------- |
 | GET        | `/api/config`                           | Connection readiness and public limits; never the key                                    |
+| GET        | `/api/cosmos/databases`                 | List database IDs from the configured Cosmos account                                     |
+| GET        | `/api/cosmos/containers?databaseId=…`   | List container IDs in a database                                                         |
+| POST       | `/api/cosmos/preview`                   | Preview up to 10 results using `{ databaseId, containerId, query, limit }`               |
+| POST       | `/api/cosmos/import`                    | Save a snapshot using the preview payload plus `name`; returns HTTP 202                  |
 | GET / POST | `/api/datasets`                         | List datasets / upload multipart `file` and optional `name`                              |
 | GET        | `/api/datasets/:id`                     | Metadata, import progress, fields, sources, notices                                      |
+| PATCH      | `/api/datasets/:id`                     | Rename with `{ name }`; trimmed, 1–150 characters                                        |
+| DELETE     | `/api/datasets/:id`                     | Delete local dataset, history, and import files; HTTP 204, or 409 while busy             |
 | POST       | `/api/datasets/:id/import`              | Continue with `{ selections: { sourceId: jsonPointerOrNull } }`                          |
 | GET        | `/api/datasets/:id/records`             | Records; optional `search`, `sourceId`, pagination                                       |
 | POST       | `/api/datasets/:id/preview`             | Validate configuration and preview request/count, without inference                      |
@@ -153,4 +206,4 @@ Responses are JSON unless exporting. Invalid input returns `{ "error": "..." }` 
 
 JSON exports include the configuration and original records with raw answers. CSV exports include result values, confidence where applicable, probability distributions, source identifiers, model, usage, and errors. Cells are quoted and spreadsheet formula prefixes escaped.
 
-Direct Cosmos connections, cross-record joins, document editing, team hosting/authentication, generated chat answers, PDFs, and Office file extraction are outside v1.
+Cross-record joins within the local workbench, document editing, team hosting/authentication, generated chat answers, PDFs, and Office file extraction are outside v1.
